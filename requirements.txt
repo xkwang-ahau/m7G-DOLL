@@ -1,0 +1,10 @@
+# Direct dependencies only; NOT the original experiment's frozen environment.
+# Do not install this unpinned list into the working experiment environment.
+# See docs/ENVIRONMENT.md and export the actual server environment first.
+numpy
+pandas
+scikit-learn
+torch
+rna-fm
+transformers
+einops

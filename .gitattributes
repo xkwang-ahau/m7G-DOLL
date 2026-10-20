@@ -1,0 +1,4 @@
+# Preserve exact supplied CSV bytes, including line endings, for SHA-256 checks.
+dataset/*.csv -text
+*.py text eol=lf
+*.md text eol=lf
