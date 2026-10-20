@@ -1,8 +1,3 @@
-"""
-m7G-DOLL: RNA-FM + DNABERT-2 LoRA training and OOF probability fusion.
-
-"""
-
 import os
 import sys
 import json
@@ -42,30 +37,17 @@ try:
     import fm
 except ImportError as e:
     raise ImportError('RNA-FM is required. Install with: pip install rna-fm') from e
-DNABERT_LOCAL_DIR = os.environ.get('DNABERT_LOCAL_DIR', '')
-DNABERT_REPO_ID = os.environ.get('M7G_DNABERT_REPO_ID', 'zhihan1996/DNABERT-2-117M')
-DNABERT_REVISION = os.environ.get('M7G_DNABERT_REVISION') or None
-DNABERT_CODE_REVISION = os.environ.get('M7G_DNABERT_CODE_REVISION') or None
-DNABERT_OFFLINE = os.environ.get('M7G_OFFLINE', '0') == '1'
-if DNABERT_LOCAL_DIR:
-    if not os.path.isdir(DNABERT_LOCAL_DIR):
-        raise FileNotFoundError('Configured DNABERT_LOCAL_DIR does not exist.')
+DNABERT_LOCAL_DIR = '/home/lchen/plm-m7g/DNABERT-2-117M'
+DNABERT_REPO_ID = 'zhihan1996/DNABERT-2-117M'
+if DNABERT_LOCAL_DIR and os.path.isdir(DNABERT_LOCAL_DIR):
+    os.environ['HF_HUB_OFFLINE'] = '1'
+    os.environ['TRANSFORMERS_OFFLINE'] = '1'
     DNABERT_NAME = DNABERT_LOCAL_DIR
-    DNABERT_SOURCE_MODE = 'local snapshot'
+    DNABERT_SOURCE_MODE = 'local (offline)'
 else:
+    os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
     DNABERT_NAME = DNABERT_REPO_ID
-    DNABERT_SOURCE_MODE = 'upstream repository (or configured HF_ENDPOINT)'
-
-def dnabert_load_kwargs(include_remote_code=True):
-    kwargs = {'local_files_only': DNABERT_OFFLINE}
-    if include_remote_code:
-        kwargs['trust_remote_code'] = True
-    if not DNABERT_LOCAL_DIR and DNABERT_REVISION:
-        kwargs['revision'] = DNABERT_REVISION
-    if include_remote_code and not DNABERT_LOCAL_DIR and DNABERT_CODE_REVISION:
-        kwargs['code_revision'] = DNABERT_CODE_REVISION
-    return kwargs
-
+    DNABERT_SOURCE_MODE = f"remote via {os.environ['HF_ENDPOINT']}"
 try:
     from transformers import AutoTokenizer, AutoModel
     HAS_TRANSFORMERS = True
@@ -96,17 +78,11 @@ HIDDEN_DIM = 256
 DROPOUT = 0.4
 ENSEMBLE_W_GRID = np.round(np.arange(0.0, 1.0001, 0.05), 4)
 FIXED_THRESHOLD = 0.5
-DATA_DIR = os.environ.get('M7G_DATA_DIR', os.path.join(HERE, 'dataset'))
-OUT_DIR = os.environ.get('M7G_OUTPUT_DIR', os.path.join(HERE, 'results'))
-# The release launcher requires an empty output directory; no legacy caches are reused.
-REUSE_CACHED = False
+DATA_DIR = '/home/lchen/plm-m7g/dataset'
+OUT_DIR = os.path.join(HERE, 'dual_plm_resultslora16')
+os.makedirs(OUT_DIR, exist_ok=True)
+REUSE_CACHED = True
 DATASETS = [{'name': 'mostdistant401', 'train_csv': os.path.join(DATA_DIR, 'train_mostdistant401.csv'), 'test_csv': os.path.join(DATA_DIR, 'test_mostdistant401.csv')}, {'name': 'mature_mostdistant201', 'train_csv': os.path.join(DATA_DIR, 'train_mature_mostdistant201.csv'), 'test_csv': os.path.join(DATA_DIR, 'test_mature_mostdistant201.csv')}]
-DATASET_SELECTION = os.environ.get('M7G_DATASET', 'both')
-if DATASET_SELECTION not in ('full', 'mature', 'both'):
-    raise ValueError('M7G_DATASET must be full, mature, or both.')
-if DATASET_SELECTION != 'both':
-    selected_name = 'mostdistant401' if DATASET_SELECTION == 'full' else 'mature_mostdistant201'
-    DATASETS = [cfg for cfg in DATASETS if cfg['name'] == selected_name]
 METRIC_NAMES = ['acc', 'sn', 'sp', 'prec', 'f1', 'mcc', 'auc']
 
 class LoRALinear(nn.Module):
@@ -652,21 +628,21 @@ def load_rnafm():
 
 def _load_dnabert_backbone():
     try:
-        return AutoModel.from_pretrained(DNABERT_NAME, **dnabert_load_kwargs())
+        return AutoModel.from_pretrained(DNABERT_NAME, trust_remote_code=True)
     except ValueError as e:
         if 'config_class' not in str(e):
             raise
         print('  [DNABERT-2] config_class mismatch; retrying with explicit BertConfig ...')
         from transformers import BertConfig
-        cfg = BertConfig.from_pretrained(DNABERT_NAME, **dnabert_load_kwargs(include_remote_code=False))
-        return AutoModel.from_pretrained(DNABERT_NAME, config=cfg, **dnabert_load_kwargs())
+        cfg = BertConfig.from_pretrained(DNABERT_NAME)
+        return AutoModel.from_pretrained(DNABERT_NAME, config=cfg, trust_remote_code=True)
 
 def load_dnabert():
     if not HAS_TRANSFORMERS:
         raise ImportError('DNABERT-2 needs `transformers` and `einops`. Install with: pip install transformers einops')
     print(f'\nLoading DNABERT-2 [{DNABERT_SOURCE_MODE}]')
     print(f'  source: {DNABERT_NAME}')
-    tokenizer = AutoTokenizer.from_pretrained(DNABERT_NAME, **dnabert_load_kwargs())
+    tokenizer = AutoTokenizer.from_pretrained(DNABERT_NAME, trust_remote_code=True)
     dnabert = _load_dnabert_backbone()
     patched = patch_dnabert2_flash_attention()
     if patched:
@@ -676,7 +652,9 @@ def load_dnabert():
     dnabert.to(DEVICE)
     n = inject_lora(dnabert, DNABERT_LORA_TARGETS)
     if n == 0:
-        raise RuntimeError('DNABERT-2: no LoRA target modules matched; refusing silent head-only fallback. Check the pinned pretrained implementation.')
+        for p in dnabert.parameters():
+            p.requires_grad = False
+        print('  DNABERT-2 LoRA: 0 modules matched -> FALLING BACK to a frozen DNABERT-2 (head-only training).')
     else:
         n_tr, n_to = count_params(dnabert)
         print(f'  DNABERT-2 LoRA: replaced {n} linears; trainable {n_tr:,}/{n_to:,} ({100.0 * n_tr / n_to:.3f}%)')
@@ -726,7 +704,8 @@ def main():
     all_summaries = []
     for cfg in DATASETS:
         if not (os.path.exists(cfg['train_csv']) and os.path.exists(cfg['test_csv'])):
-            raise FileNotFoundError(f"Dataset files missing for {cfg['name']}. Use run.py --audit-only first.")
+            print(f"\n[Skip] {cfg['name']} — files not found.")
+            continue
         all_summaries.append(run_dataset(cfg, rnafm, batch_converter, tokenizer, dnabert))
     print('\n' + '=' * 90)
     print('FINAL SUMMARY (multi-PLM ensemble)')
@@ -741,4 +720,4 @@ def main():
         json.dump(all_summaries, f, indent=2)
     print(f'\nAll outputs saved under: {OUT_DIR}')
 if __name__ == '__main__':
-    raise SystemExit('Use python run.py --audit-only, --smoke-test, or --train; the launcher validates data and protects existing outputs.')
+    main()
