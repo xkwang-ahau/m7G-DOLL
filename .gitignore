@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editors
+.idea/
+.vscode/
+
+# Training outputs (dual_plm.py writes these next to the script)
+dual_plm_resultslora16/
+results/
+*.npy
+*.pth
+*.log
+
+# Local model snapshots and checkpoints
+DNABERT-2-117M/
+pretrained_models/
+*.safetensors
+*.bin
